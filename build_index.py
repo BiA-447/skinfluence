@@ -1,41 +1,102 @@
 """
 build_index.py  -  RUN THIS ONCE (in Google Colab), not inside the Streamlit app.
 
-It reads ALL products from Supabase and the knowledge/*.md files, cuts them into chunks,
-turns every chunk into an embedding, and saves everything permanently:
+It reads the products from your Supabase database, adds the knowledge/*.md files,
+cuts everything into chunks, turns every chunk into an embedding, and saves it permanently:
     index/faiss.index   -> the FAISS vector index
     index/chunks.json   -> the text + details of every chunk (same order as the index)
 
-Run it again ONLY when you ADD new products or change a product's descriptive text
-(ingredients, concerns, skin types, goals, description) or edit the knowledge files.
-You do NOT need to re-run it for price, seller, purchase_url, last_verified or is_active changes:
-the app reads those live from Supabase.
+Before running, set these two things (see the Colab steps):
+    SUPABASE_URL        e.g. https://abcd1234.supabase.co
+    SUPABASE_ANON_KEY   your PUBLISHABLE / anon key (never the secret key)
 
-Needs two environment variables: SUPABASE_URL and SUPABASE_ANON_KEY.
+Run it again ONLY when you add products, rename products, or change ingredients/descriptions
+or the knowledge files.  Prices, links, sellers and community insights are read LIVE by the
+app and never need a rebuild.
 """
 import glob
 import json
 import os
 import re
+from collections import Counter
+from pathlib import Path
 
 import faiss
-from sentence_transformers import SentenceTransformer
 
 import core
 
+BASE = Path(__file__).resolve().parent            # works no matter where the script is run from
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"   # free, small, runs on CPU
-KNOWLEDGE_GLOB = "knowledge/*.md"
-INDEX_DIR = "index"
+KNOWLEDGE_GLOB = str(BASE / "knowledge" / "*.md")
+INDEX_DIR = BASE / "index"
+
+
+def parse_list(value):
+    """Supabase text[] columns arrive as real lists. This also handles {"a","b"} text just in case."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    s = str(value).strip()
+    if not s or s.lower() == "nan":
+        return []
+    quoted = re.findall(r'"([^"]+)"', s)
+    if quoted:
+        return [q.strip() for q in quoted]
+    return [p.strip() for p in s.strip("{}").split(",") if p.strip()]
+
+
+def to_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def normalise_origin(value):
+    return "Pakistan" if str(value).strip().lower() in ("pakistan", "pakistani", "local", "pk") else "Imported"
 
 
 def build_chunks(rows):
     chunks = []
 
-    # ---------- 1) PRODUCTS: one chunk per product (active AND inactive, so you can switch
-    #             is_active on/off in Supabase later without rebuilding) ----------
-    for r in rows:
-        meta = core.normalise_row(r)
-        chunks.append({"type": "product", "text": core.product_chunk_text(meta), "meta": meta})
+    # ---------- 1) PRODUCTS: one chunk per product ----------
+    for r in sorted(rows, key=lambda r: (str(r.get("brand", "")), str(r.get("name", "")))):
+        pid = str(r["id"])
+        meta = {
+            "product_id": pid,                      # the Supabase id - links this index to the live tables
+            "ref": pid[:8],                         # short id the LLM sees (easier for it to copy)
+            "name": str(r.get("name") or "").strip(),
+            "brand": str(r.get("brand") or "").strip(),
+            "category": str(r.get("category") or "").strip(),
+            "product_type": str(r.get("product_type") or "").strip(),
+            "origin": normalise_origin(r.get("origin")),
+            "price": to_float(r.get("price")),
+            "currency": str(r.get("currency") or "PKR").strip(),
+            "description": str(r.get("description") or "").strip(),
+            "skin_types": parse_list(r.get("skin_types")),
+            "concerns": parse_list(r.get("concerns")),
+            "goals": parse_list(r.get("goals")),
+            "key_ingredients": parse_list(r.get("key_ingredients")),
+            "sensitivity_level": str(r.get("sensitivity_level") or "").strip(),
+            "prescription_required": bool(r.get("prescription_required")),
+            "last_verified": str(r.get("last_verified") or "").strip(),
+            "is_active": r.get("is_active") is not False,
+            # filled live from product_sources / retailers by the app
+            "seller": "", "purchase_url": "", "verification_status": "",
+        }
+        text = (
+            f"{meta['name']} by {meta['brand']}. "
+            f"Category: {meta['category']} ({meta['product_type']}). "
+            f"Origin: {meta['origin']}. "
+            f"Key ingredients: {', '.join(meta['key_ingredients'])}. "
+            f"Suitable skin types: {', '.join(meta['skin_types'])}. "
+            f"Helps with: {', '.join(meta['concerns'])}. "
+            f"Supports goals: {', '.join(meta['goals'])}. "
+            f"Sensitivity level: {meta['sensitivity_level']}. "
+            f"{meta['description']}"
+        )
+        chunks.append({"type": "product", "text": text, "meta": meta})
 
     # ---------- 2) KNOWLEDGE: one chunk per '## heading' section ----------
     for path in sorted(glob.glob(KNOWLEDGE_GLOB)):
@@ -49,14 +110,28 @@ def build_chunks(rows):
 
 
 def main():
-    url, key = os.environ.get("SUPABASE_URL"), os.environ.get("SUPABASE_ANON_KEY")
+    from sentence_transformers import SentenceTransformer     # imported here so the file can be tested without it
+
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = (os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY") or "").strip()
     if not url or not key:
         raise SystemExit("Set SUPABASE_URL and SUPABASE_ANON_KEY first (see the Colab steps).")
 
-    rows = core.fetch_products(url, key)
+    rows = core.supabase_get(url, key, "products")
+    if not rows:
+        raise SystemExit("Supabase returned 0 products. Most likely the 'products' table has no public "
+                         "READ policy (run supabase_policies.sql in the Supabase SQL Editor), "
+                         "or the URL/key is wrong.")
+
     chunks = build_chunks(rows)
-    n_prod = sum(c["type"] == "product" for c in chunks)
-    print(f"{n_prod} product chunks + {len(chunks) - n_prod} knowledge chunks")
+    prods = [c["meta"] for c in chunks if c["type"] == "product"]
+    n_know = len(chunks) - len(prods)
+    print(f"{len(prods)} product chunks + {n_know} knowledge chunks")
+    print("Categories:", dict(Counter(m["category"] for m in prods)))
+    print("Origins:   ", dict(Counter(m["origin"] for m in prods)))
+    unmapped = sorted({m["category"] for m in prods if core.bucket_of(m["category"]) is None})
+    if unmapped:
+        print("NOTE: these categories are not used for routines (fine for toners etc.):", unmapped)
 
     # ---------- 3) EMBED EVERYTHING (this is the only time it happens) ----------
     model = SentenceTransformer(MODEL_NAME)
@@ -68,9 +143,9 @@ def main():
     index.add(emb)
 
     # ---------- 5) SAVE PERMANENTLY ----------
-    os.makedirs(INDEX_DIR, exist_ok=True)
-    faiss.write_index(index, f"{INDEX_DIR}/faiss.index")
-    with open(f"{INDEX_DIR}/chunks.json", "w", encoding="utf-8") as f:
+    INDEX_DIR.mkdir(exist_ok=True)
+    faiss.write_index(index, str(INDEX_DIR / "faiss.index"))
+    with open(INDEX_DIR / "chunks.json", "w", encoding="utf-8") as f:
         json.dump({"model": MODEL_NAME, "chunks": chunks}, f, ensure_ascii=False)
     print("Saved index/faiss.index and index/chunks.json")
 
