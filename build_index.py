@@ -6,9 +6,10 @@ cuts everything into chunks, turns every chunk into an embedding, and saves it p
     index/faiss.index   -> the FAISS vector index
     index/chunks.json   -> the text + details of every chunk (same order as the index)
 
-Before running, set these two things (see the Colab steps):
+Before running, set these two environment variables in a SEPARATE Colab cell (do NOT type them in this file):
     SUPABASE_URL        e.g. https://abcd1234.supabase.co
     SUPABASE_ANON_KEY   your PUBLISHABLE / anon key (never the secret key)
+Then run this file with:   !python build_index.py
 
 Run it again ONLY when you add products, rename products, or change ingredients/descriptions
 or the knowledge files.  Prices, links, sellers and community insights are read LIVE by the
@@ -25,7 +26,8 @@ import faiss
 
 import core
 
-BASE = Path(__file__).resolve().parent            # works no matter where the script is run from
+# Folder of this script. If the code is pasted into a Colab cell (no file), use the current folder instead.
+BASE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"   # free, small, runs on CPU
 KNOWLEDGE_GLOB = str(BASE / "knowledge" / "*.md")
 INDEX_DIR = BASE / "index"
@@ -110,12 +112,15 @@ def build_chunks(rows):
 
 
 def main():
-    from sentence_transformers import SentenceTransformer     # imported here so the file can be tested without it
-
-    url = os.environ.get("https://bfrqsrkfulwrraxrtwlg.supabase.co", "").strip()
-    key = (os.environ.get("sb_publishable_jNm7pS2M1hPWZlPWe2-XsA_3WK8R9cc ") or os.environ.get("sb_publishable_jNm7pS2M1hPWZlPWe2-XsA_3WK8R9cc") or "").strip()
+    url = os.environ.get("SUPABASE_URL", "").strip()
+    key = (os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY") or "").strip()
     if not url or not key:
-        raise SystemExit("Set SUPABASE_URL and SUPABASE_ANON_KEY first (see the Colab steps).")
+        raise SystemExit("Set SUPABASE_URL and SUPABASE_ANON_KEY first, in a separate Colab cell:\n"
+                         "  import os\n"
+                         '  os.environ["SUPABASE_URL"] = "https://YOUR-PROJECT.supabase.co"\n'
+                         '  os.environ["SUPABASE_ANON_KEY"] = "YOUR_PUBLISHABLE_KEY"')
+
+    from sentence_transformers import SentenceTransformer     # imported here so the file can be tested without it
 
     rows = core.supabase_get(url, key, "products")
     if not rows:
