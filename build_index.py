@@ -59,6 +59,26 @@ def normalise_origin(value):
     return "Pakistan" if str(value).strip().lower() in ("pakistan", "pakistani", "local", "pk") else "Imported"
 
 
+def dedupe_products(rows, source_rows=(), insight_rows=()):
+    """The same product can exist twice in the table (e.g. imported twice). Keep ONE per brand+name:
+    the copy that already has seller links / community insights, otherwise the oldest one.
+    The ids of the dropped copies are remembered so their links and insights still show up."""
+    used = Counter()
+    for r in list(source_rows) + list(insight_rows):
+        used[str(r.get("product_id"))] += 1
+    groups = {}
+    for r in rows:
+        key = (str(r.get("brand") or "").strip().lower(), str(r.get("name") or "").strip().lower())
+        groups.setdefault(key, []).append(r)
+    kept = []
+    for items in groups.values():
+        items.sort(key=lambda r: (-used[str(r["id"])], str(r.get("created_at") or "9999"), str(r["id"])))
+        keeper = dict(items[0])
+        keeper["_aliases"] = [str(r["id"]) for r in items[1:]]
+        kept.append(keeper)
+    return kept
+
+
 def build_chunks(rows):
     chunks = []
 
@@ -84,6 +104,7 @@ def build_chunks(rows):
             "prescription_required": bool(r.get("prescription_required")),
             "last_verified": str(r.get("last_verified") or "").strip(),
             "is_active": r.get("is_active") is not False,
+            "alias_ids": r.get("_aliases", []),      # ids of duplicate rows that were merged into this one
             # filled live from product_sources / retailers by the app
             "seller": "", "purchase_url": "", "verification_status": "",
         }
@@ -127,6 +148,18 @@ def main():
         raise SystemExit("Supabase returned 0 products. Most likely the 'products' table has no public "
                          "READ policy (run supabase_policies.sql in the Supabase SQL Editor), "
                          "or the URL/key is wrong.")
+
+    def optional(table):
+        try:
+            return core.supabase_get(url, key, table)
+        except Exception:
+            return []
+
+    before = len(rows)
+    rows = dedupe_products(rows, optional("product_sources"), optional("reddit_insights"))
+    if len(rows) != before:
+        print(f"Found {before} rows but only {len(rows)} different products: "
+              f"{before - len(rows)} duplicate rows were merged.")
 
     chunks = build_chunks(rows)
     prods = [c["meta"] for c in chunks if c["type"] == "product"]
