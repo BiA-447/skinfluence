@@ -112,8 +112,8 @@ def build_chunks(rows):
 def main():
     from sentence_transformers import SentenceTransformer     # imported here so the file can be tested without it
 
-    url = os.environ.get("SUPABASE_URL", "").strip()
-    key = (os.environ.get("SUPABASE_ANON_KEY") or os.environ.get("SUPABASE_KEY") or "").strip()
+    url = os.environ.get("https://bfrqsrkfulwrraxrtwlg.supabase.co", "").strip()
+    key = (os.environ.get("sb_publishable_jNm7pS2M1hPWZlPWe2-XsA_3WK8R9cc ") or os.environ.get("SUPABASE_KEY") or "").strip()
     if not url or not key:
         raise SystemExit("Set SUPABASE_URL and SUPABASE_ANON_KEY first (see the Colab steps).")
 
