@@ -192,7 +192,9 @@ def apply_live(chunks, live):
         m["price"] = _num(row.get("price"))
         m["is_active"] = row.get("is_active") is not False
         m["last_verified"] = str(row.get("last_verified") or "").strip()
-        srcs = sources.get(pid, [])
+        ids = [pid] + list(c["meta"].get("alias_ids", []))     # include merged duplicate rows
+        srcs = sorted((x for i in ids for x in sources.get(i, [])),
+                      key=lambda x: (_STATUS_RANK[x["status"]], x["price"] if x["price"] is not None else 1e12))
         if srcs:
             best = srcs[0]
             m.update(seller=best["seller"], purchase_url=best["url"], verification_status=best["status"])
@@ -203,7 +205,8 @@ def apply_live(chunks, live):
             m["other_sources"] = srcs[1:4]
         else:
             m.update(seller="", purchase_url="", verification_status="", other_sources=[])
-        m["insights"] = insights.get(pid, [])[:2]
+        merged = sorted((x for i in ids for x in insights.get(i, [])), key=lambda x: not x["is_verified"])
+        m["insights"] = merged[:2]
         out.append({**c, "meta": m})
     return out
 
