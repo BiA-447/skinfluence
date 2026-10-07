@@ -12,7 +12,7 @@ import faiss
 from rapidfuzz import fuzz
 
 BASE = Path(__file__).resolve().parent
-GROQ_MODEL = "llama-3.3-70b-versatile"      # fallback: "llama-3.1-8b-instant"
+GROQ_MODEL = "openai/gpt-oss-120b"      # fallback: "llama-3.1-8b-instant"
 
 # What to do when the user says they are pregnant (in "Anything else we should know"):
 #   "no_actives" -> only basic cleanser / moisturizer / sunscreen with NO active ingredients
